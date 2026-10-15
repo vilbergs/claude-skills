@@ -1,0 +1,14 @@
+[package]
+name = "prkit"
+description = "GitHub PR helpers on top of gh: review threads, posting reviews, review queue, team triage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+common.workspace = true
+regex.workspace = true
+serde_json.workspace = true

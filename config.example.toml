@@ -1,0 +1,34 @@
+# Copy to ~/.config/claude-skills/config.toml (or point CLAUDE_SKILLS_CONFIG at it).
+# Everything here is optional; each binary says what it's missing.
+# This file holds ids, not secrets, but keep your real copy out of git.
+
+[notion]
+token_file = "~/.notion_token"           # NOTION_TOKEN overrides
+
+# `notion issue ...`: template-based issues in one database (API version 2025-09-03).
+[notion.issue]
+database_id = "00000000-0000-0000-0000-000000000000"
+data_source_id = "00000000-0000-0000-0000-000000000000"
+reporter_id = "00000000-0000-0000-0000-000000000000"   # Notion user id set as reporter
+reporter_name = "Me"
+
+# Flag -> property name, when your database names differ from the defaults
+# (Type, Priority, Product, Discovery context, Status, Summary, Slack, Github,
+#  Component, Project, Feature, Reporter).
+[notion.issue.properties]
+project = "Project"
+
+# alias accepted by --template -> Notion template name and the Type it implies
+[notion.issue.templates]
+bug = { name = "Bug", type = "Bug" }
+task = { name = "New task" }              # no type: --type is required
+
+[github]
+org = "my-org"                            # default for `prkit queue` / `prkit triage`
+team = "my-team"                          # default team slug for `prkit triage`
+# bots = ["coderabbitai", "copilot", "dependabot", "github-actions", "renovate", "sonarcloud"]
+
+[asc]
+issuer_id = "00000000-0000-0000-0000-000000000000"
+key_id = "ABC123DEFG"                     # AuthKey_<key_id>.p8
+key_dir = "~/.appstoreconnect/private_keys"

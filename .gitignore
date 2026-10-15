@@ -1,0 +1,7 @@
+/target
+# never commit credentials or local config
+config.toml
+*.p8
+*.pem
+.env*
+.notion_token

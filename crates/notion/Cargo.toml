@@ -1,0 +1,14 @@
+[package]
+name = "notion"
+description = "Notion CLI: query databases, read pages as markdown, write blocks, file template-based issues"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+common.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+ureq.workspace = true

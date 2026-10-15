@@ -1,0 +1,15 @@
+[package]
+name = "things"
+description = "Things 3 CLI for macOS: reads the local database, writes via the things:/// URL scheme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+common.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+urlencoding = "2"
