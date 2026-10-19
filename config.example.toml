@@ -32,3 +32,7 @@ team = "my-team"                          # default team slug for `prkit triage`
 issuer_id = "00000000-0000-0000-0000-000000000000"
 key_id = "ABC123DEFG"                     # AuthKey_<key_id>.p8
 key_dir = "~/.appstoreconnect/private_keys"
+
+[hevy]
+api_key_file = "~/.hevy_api_key"          # HEVY_API_KEY overrides
+units = "kg"                              # or "lb": unit for bare weights like "3x8@80"

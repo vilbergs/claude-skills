@@ -5,3 +5,4 @@ config.toml
 *.pem
 .env*
 .notion_token
+.hevy_api_key

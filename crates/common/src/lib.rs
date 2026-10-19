@@ -15,6 +15,7 @@ pub struct Config {
     pub notion: NotionConfig,
     pub github: GithubConfig,
     pub asc: AscConfig,
+    pub hevy: HevyConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -65,6 +66,15 @@ pub struct AscConfig {
     pub key_id: Option<String>,
     /// Extra directory to search for `AuthKey_<id>.p8`.
     pub key_dir: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct HevyConfig {
+    /// File holding the API key. Default `~/.hevy_api_key`.
+    pub api_key_file: Option<String>,
+    /// Unit for bare weights in workout specs and for output: "kg" (default) or "lb".
+    pub units: Option<String>,
 }
 
 pub fn home() -> PathBuf {
