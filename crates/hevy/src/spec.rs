@@ -1,8 +1,9 @@
-//! The workout spec `hevy create` accepts, and its translation into the API body.
+//! The workout and routine specs `hevy create`/`create-routine` accept, their
+//! translation into API bodies, and the reverse (`hevy spec`).
 //!
 //! A spec is JSON with exercises named by title (or template id) and sets either as
 //! objects or as shorthand strings like "3x8@80", "5x5@100kg rpe8", "w 10@40",
-//! "3x60s", "5km 30:00". See `parse_shorthand` for the grammar.
+//! "3x60s", "5km 30:00", and in routines "3x8-12@60". See `parse_shorthand`.
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Local, NaiveDateTime, NaiveTime, SecondsFormat, TimeZone, Utc};
@@ -79,8 +80,23 @@ pub struct ExerciseSpec {
     /// Exercises sharing a number form a superset.
     #[serde(default)]
     pub superset: Option<u32>,
+    /// Rest between sets, routines only: "90s", "2min", "1:30" or seconds.
+    #[serde(default)]
+    pub rest: Option<Value>,
     /// A shorthand string, or a list of shorthand strings and set objects.
     pub sets: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineSpec {
+    pub title: String,
+    /// Folder title or id; none means "My Routines".
+    #[serde(default)]
+    pub folder: Option<Value>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub exercises: Vec<ExerciseSpec>,
 }
 
 /// Build the `{"workout": {...}}` body. `resolve` maps an exercise name to a template id.
@@ -92,10 +108,16 @@ pub fn build(spec: &Spec, unit: Unit, now: DateTime<Utc>, mut resolve: impl FnMu
     let mut exercises = Vec::new();
     for (i, e) in spec.exercises.iter().enumerate() {
         let ctx = || format!("exercise {} ({})", i + 1, e.exercise);
+        if e.rest.is_some() {
+            bail!("{}: rest is only for routines", ctx());
+        }
         let id = resolve(&e.exercise).with_context(ctx)?;
         let sets = sets(&e.sets, unit).with_context(ctx)?;
         if sets.is_empty() {
             bail!("{} has no sets", ctx());
+        }
+        if sets.iter().any(|s| s.get("rep_range").is_some()) {
+            bail!("{}: rep ranges like 8-12 are only for routines; log the reps done", ctx());
         }
         exercises.push(json!({
             "exercise_template_id": id,
@@ -112,6 +134,72 @@ pub fn build(spec: &Spec, unit: Unit, now: DateTime<Utc>, mut resolve: impl FnMu
         "is_private": spec.private,
         "exercises": exercises,
     }}))
+}
+
+/// Build the `{"routine": {...}}` body. `folder` maps a folder title to its id.
+pub fn build_routine(
+    spec: &RoutineSpec,
+    unit: Unit,
+    mut resolve: impl FnMut(&str) -> Result<String>,
+    folder: impl FnOnce(&str) -> Result<u64>,
+) -> Result<Value> {
+    if spec.exercises.is_empty() {
+        bail!("the routine has no exercises");
+    }
+    let folder_id = match &spec.folder {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::Number(n)) => Value::Number(n.clone()),
+        Some(Value::String(s)) => match s.parse::<u64>() {
+            Ok(n) => n.into(),
+            Err(_) => folder(s)?.into(),
+        },
+        Some(v) => bail!("folder must be a title or id, got {v}"),
+    };
+    let mut exercises = Vec::new();
+    for (i, e) in spec.exercises.iter().enumerate() {
+        let ctx = || format!("exercise {} ({})", i + 1, e.exercise);
+        let id = resolve(&e.exercise).with_context(ctx)?;
+        let mut sets = sets(&e.sets, unit).with_context(ctx)?;
+        if sets.is_empty() {
+            bail!("{} has no sets", ctx());
+        }
+        for s in &mut sets {
+            let m = s.as_object_mut().unwrap();
+            if !m.remove("rpe").unwrap_or(Value::Null).is_null() {
+                bail!("{}: routines don't take RPE; put a target in the notes", ctx());
+            }
+            if m.get("rep_range").is_some() {
+                m["reps"] = Value::Null;
+            }
+        }
+        let rest = e.rest.as_ref().map(rest_seconds).transpose().with_context(ctx)?;
+        exercises.push(json!({
+            "exercise_template_id": id,
+            "superset_id": e.superset,
+            "rest_seconds": rest,
+            "notes": e.notes,
+            "sets": sets,
+        }));
+    }
+    Ok(json!({ "routine": {
+        "title": spec.title,
+        "folder_id": folder_id,
+        "notes": spec.notes,
+        "exercises": exercises,
+    }}))
+}
+
+fn rest_seconds(v: &Value) -> Result<u64> {
+    if let Some(n) = v.as_u64() {
+        return Ok(n);
+    }
+    let s = v.as_str().ok_or_else(|| anyhow!("rest must be seconds or a string like \"90s\""))?;
+    let set = parse_shorthand(s, Unit::Kg).context("rest")?;
+    match (set.len(), set[0]["duration_seconds"].as_u64(), set[0]["reps"].as_u64()) {
+        (1, Some(d), None) => Ok(d),
+        (1, None, Some(n)) => Ok(n),
+        _ => bail!("can't read rest {s:?}: use \"90s\", \"2min\", \"1:30\" or seconds"),
+    }
 }
 
 fn rfc3339(t: DateTime<Utc>) -> String {
@@ -232,12 +320,13 @@ static WEIGHT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+(?:\.\d+)?)(
 static DIST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+(?:\.\d+)?)(km|m|mi)$").unwrap());
 static SECS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)(s|sec|min)$").unwrap());
 static CLOCK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+):(\d{2})(?::(\d{2}))?$").unwrap());
+static RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)-(\d+)$").unwrap());
 static RPE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^rpe(\d+(?:\.5)?)$").unwrap());
 
 /// Shorthand for one or more identical sets, tokens separated by spaces:
 ///
 /// - `3x...` (first token) repeats the set 3 times
-/// - `8` reps; `@80`, `@80kg`, `@175lb`, `80kg` weight (bare numbers use the default
+/// - `8` reps, `8-12` a rep range (routines); `@80`, `@80kg`, `@175lb`, `80kg` weight (bare numbers use the default
 ///   unit); `@bw` no weight
 /// - `5km`, `400m`, `2mi` distance; `60s`, `2min`, `1:30`, `1:02:03` duration
 /// - `rpe8`, `rpe9.5`; `w`/`warmup`, `f`/`failure`, `d`/`dropset`
@@ -271,6 +360,8 @@ pub fn parse_shorthand(s: &str, unit: Unit) -> Result<Vec<Value>> {
                 bail!("{}: reps given twice", ctx());
             }
             m["reps"] = t.parse::<u64>()?.into();
+        } else if let Some(c) = RANGE.captures(t) {
+            m.insert("rep_range".into(), range(c[1].parse()?, c[2].parse()?).with_context(ctx)?);
         } else if let Some(c) = WEIGHT.captures(t).filter(|c| c.get(2).is_some()) {
             m["weight_kg"] = weight(&c, unit).into();
         } else if let Some(c) = DIST.captures(t) {
@@ -301,6 +392,13 @@ pub fn parse_shorthand(s: &str, unit: Unit) -> Result<Vec<Value>> {
     repeat(m, count)
 }
 
+fn range(a: u64, b: u64) -> Result<Value> {
+    if a > b {
+        bail!("rep range {a}-{b} runs backwards");
+    }
+    Ok(json!({"start": a, "end": b}))
+}
+
 fn weight(c: &regex::Captures, unit: Unit) -> f64 {
     let x: f64 = c[1].parse().unwrap();
     match c.get(2).map(|m| m.as_str()) {
@@ -312,7 +410,7 @@ fn weight(c: &regex::Captures, unit: Unit) -> f64 {
 
 /// A set object: API field names (weight_kg, reps, distance_meters, duration_seconds,
 /// custom_metric, rpe, type) plus conveniences: kg, lb, weight (default unit), km, m, mi,
-/// seconds, duration ("1:30"), count.
+/// seconds, duration ("1:30"), count, rep_range ([8, 12] or "8-12").
 fn parse_object(o: &Map<String, Value>, unit: Unit) -> Result<Vec<Value>> {
     let ctx = || format!("set {}", Value::Object(o.clone()));
     let num = |v: &Value| v.as_f64().ok_or_else(|| anyhow!("{v} is not a number"));
@@ -324,6 +422,16 @@ fn parse_object(o: &Map<String, Value>, unit: Unit) -> Result<Vec<Value>> {
                 "type" => m["type"] = set_type(v.as_str().unwrap_or("")).ok_or_else(|| anyhow!("unknown set type {v}"))?.into(),
                 "count" => count = v.as_u64().ok_or_else(|| anyhow!("count must be a whole number"))? as usize,
                 "reps" => m["reps"] = v.clone(),
+                "rep_range" => {
+                    let (a, b) = match v {
+                        Value::Array(a) if a.len() == 2 => (a[0].as_u64(), a[1].as_u64()),
+                        Value::String(s) => s.split_once('-').map_or((None, None), |(a, b)| (a.trim().parse().ok(), b.trim().parse().ok())),
+                        Value::Object(o) => (o.get("start").and_then(Value::as_u64), o.get("end").and_then(Value::as_u64)),
+                        _ => (None, None),
+                    };
+                    let (a, b) = a.zip(b).ok_or_else(|| anyhow!("rep_range must be [8, 12] or \"8-12\""))?;
+                    m.insert("rep_range".into(), range(a, b)?);
+                }
                 "weight_kg" | "kg" => m["weight_kg"] = v.clone(),
                 "lb" | "lbs" => m["weight_kg"] = Unit::Lb.to_kg(num(v)?).into(),
                 "weight" => m["weight_kg"] = unit.to_kg(num(v)?).into(),
@@ -344,6 +452,128 @@ fn parse_object(o: &Map<String, Value>, unit: Unit) -> Result<Vec<Value>> {
         r.with_context(ctx)?;
     }
     repeat(m, count)
+}
+
+/// Number without float noise: 102.05823 -> "102.06", 80.0 -> "80".
+pub fn num(x: f64) -> String {
+    let s = format!("{x:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// A set's type prefix and the rest of its shorthand, weight with an explicit unit.
+fn shorthand_parts(set: &Value, unit: Unit) -> (&'static str, String) {
+    let prefix = match set["type"].as_str() {
+        Some("warmup") => "w ",
+        Some("failure") => "f ",
+        Some("dropset") => "d ",
+        _ => "",
+    };
+    let mut head = match (set["rep_range"]["start"].as_f64(), set["rep_range"]["end"].as_f64(), set["reps"].as_f64()) {
+        (Some(a), Some(b), _) => format!("{}-{}", num(a), num(b)),
+        (_, _, Some(r)) => num(r),
+        _ => String::new(),
+    };
+    if let Some(kg) = set["weight_kg"].as_f64() {
+        head += &format!("@{}{}", num(unit.kg_to(kg)), unit.name());
+    }
+    let mut parts = vec![head];
+    if let Some(m) = set["distance_meters"].as_f64() {
+        parts.push(if m >= 1000.0 && m % 100.0 == 0.0 { format!("{}km", num(m / 1000.0)) } else { format!("{}m", num(m)) });
+    }
+    if let Some(d) = set["duration_seconds"].as_f64() {
+        parts.push(format!("{}s", d.round()));
+    }
+    if let Some(r) = set["rpe"].as_f64() {
+        parts.push(format!("rpe{}", num(r)));
+    }
+    (prefix, parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" "))
+}
+
+/// Sets as shorthand, runs of identical sets folded into "3x...".
+pub fn to_shorthand(sets: &[Value], unit: Unit) -> Vec<Value> {
+    let mut runs: Vec<((&str, String), usize, &Value)> = Vec::new();
+    for s in sets {
+        let p = shorthand_parts(s, unit);
+        match runs.last_mut() {
+            Some((last, n, _)) if *last == p => *n += 1,
+            _ => runs.push((p, 1, s)),
+        }
+    }
+    runs.into_iter()
+        .map(|((prefix, body), n, s)| match (body.is_empty(), n) {
+            (true, _) => json!({"type": s["type"].as_str().unwrap_or("normal"), "count": n}),
+            (false, 1) => json!(format!("{prefix}{body}")),
+            (false, n) => json!(format!("{prefix}{n}x{body}")),
+        })
+        .collect()
+}
+
+fn local_time(t: &Value) -> Value {
+    t.as_str()
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string().into())
+        .unwrap_or(Value::Null)
+}
+
+/// Drop null and empty-string fields so an exported spec stays short.
+fn compact(mut v: Value) -> Value {
+    if let Some(m) = v.as_object_mut() {
+        m.retain(|_, x| !x.is_null() && x != "" && x != false);
+    }
+    v
+}
+
+/// An editable workout spec from an API workout.
+pub fn export_workout(w: &Value, unit: Unit) -> Value {
+    let exercises: Vec<Value> = w["exercises"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| {
+            let sets = e["sets"].as_array().map(|s| to_shorthand(s, unit)).unwrap_or_default();
+            compact(json!({"exercise": e["title"], "notes": e["notes"], "superset": e["superset_id"], "sets": sets}))
+        })
+        .collect();
+    compact(json!({
+        "title": w["title"], "description": w["description"],
+        "start": local_time(&w["start_time"]), "end": local_time(&w["end_time"]),
+        "private": w["is_private"], "exercises": exercises,
+    }))
+}
+
+/// An editable routine spec from an API routine, or with `as_workout` a workout spec to
+/// log it: rest dropped and rep ranges set to their low end. The second value names the
+/// exercises whose ranges were collapsed.
+pub fn export_routine(r: &Value, unit: Unit, as_workout: bool) -> (Value, Vec<String>) {
+    let mut collapsed = Vec::new();
+    let exercises: Vec<Value> = r["exercises"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|e| {
+            let mut sets = e["sets"].as_array().cloned().unwrap_or_default();
+            if as_workout {
+                for s in &mut sets {
+                    if let Some(lo) = s["rep_range"]["start"].as_f64() {
+                        s["reps"] = (lo as u64).into();
+                        s["rep_range"] = Value::Null;
+                        let title = e["title"].as_str().unwrap_or("-").to_string();
+                        if !collapsed.contains(&title) {
+                            collapsed.push(title);
+                        }
+                    }
+                }
+            }
+            let rest = if as_workout { Value::Null } else { e["rest_seconds"].clone() };
+            compact(json!({"exercise": e["title"], "notes": e["notes"], "superset": e["superset_id"], "rest": rest, "sets": to_shorthand(&sets, unit)}))
+        })
+        .collect();
+    let spec = if as_workout {
+        compact(json!({"title": r["title"], "exercises": exercises}))
+    } else {
+        compact(json!({"title": r["title"], "folder": r["folder_id"], "notes": r["notes"], "exercises": exercises}))
+    };
+    (spec, collapsed)
 }
 
 /// Lowercase, punctuation to spaces, collapsed: "Bench Press (Barbell)" -> "bench press barbell".
@@ -474,6 +704,70 @@ mod tests {
         assert_eq!(mins(json!(50)), 50);
         assert!(parse_duration(&json!("soon")).is_err());
         assert!(parse_duration(&json!("")).is_err());
+    }
+
+    #[test]
+    fn rep_ranges_and_routines() {
+        assert_eq!(one("8-12@60")["rep_range"], json!({"start": 8, "end": 12}));
+        assert!(parse_shorthand("12-8", Unit::Kg).is_err());
+        assert_eq!(sets(&json!([{"rep_range": "6-8"}]), Unit::Kg).unwrap()[0]["rep_range"]["end"], 8);
+        let s: RoutineSpec = serde_json::from_value(json!({
+            "title": "Push A", "folder": "PPL",
+            "exercises": [{"exercise": "bench", "rest": "2min", "sets": ["w 10@40", "3x8-12@60"]}]
+        }))
+        .unwrap();
+        let b = build_routine(&s, Unit::Kg, |_| Ok("79D0BB3A".into()), |f| if f == "PPL" { Ok(42) } else { bail!("no folder") }).unwrap();
+        let r = &b["routine"];
+        assert_eq!(r["folder_id"], 42);
+        assert_eq!(r["exercises"][0]["rest_seconds"], 120);
+        assert_eq!(r["exercises"][0]["sets"][1]["rep_range"]["start"], 8);
+        assert_eq!(r["exercises"][0]["sets"][1]["reps"], Value::Null);
+        assert!(r["exercises"][0]["sets"][0].get("rpe").is_none());
+        let rpe: RoutineSpec = serde_json::from_value(json!({"title": "x", "exercises": [{"exercise": "a", "sets": "5@100 rpe8"}]})).unwrap();
+        assert!(build_routine(&rpe, Unit::Kg, |_| Ok("a".into()), |_| Ok(1)).is_err());
+        let w: Spec = serde_json::from_value(json!({"title": "x", "exercises": [{"exercise": "a", "sets": "3x8-12@60"}]})).unwrap();
+        assert!(build(&w, Unit::Kg, Utc::now(), |_| Ok("a".into())).is_err());
+    }
+
+    #[test]
+    fn shorthand_round_trip() {
+        for (s, unit) in [
+            ("w 10@40kg", Unit::Kg),
+            ("3x8@80kg rpe8", Unit::Kg),
+            ("f 6@80kg", Unit::Kg),
+            ("3x10", Unit::Kg),
+            ("3x60s", Unit::Kg),
+            ("5km 1650s", Unit::Kg),
+            ("400m", Unit::Kg),
+            ("3x8-12@60kg", Unit::Kg),
+            ("5@135lb", Unit::Lb),
+        ] {
+            let parsed = parse_shorthand(s, unit).unwrap();
+            assert_eq!(to_shorthand(&parsed, unit), vec![json!(s)], "{s}");
+        }
+        let mixed = sets(&json!(["w 10@40", "8@80", "8@80", "6@80"]), Unit::Kg).unwrap();
+        assert_eq!(to_shorthand(&mixed, Unit::Kg), vec![json!("w 10@40kg"), json!("2x8@80kg"), json!("6@80kg")]);
+    }
+
+    #[test]
+    fn export() {
+        let w = json!({"title": "Legs", "description": null, "start_time": "2026-10-19T17:00:00+00:00", "end_time": "2026-10-19T18:00:00+00:00",
+            "is_private": false, "exercises": [{"title": "Squat (Barbell)", "notes": "", "superset_id": null,
+            "sets": [{"type": "normal", "weight_kg": 100, "reps": 5}, {"type": "normal", "weight_kg": 100, "reps": 5}]}]});
+        let spec = export_workout(&w, Unit::Kg);
+        assert_eq!(spec["exercises"][0], json!({"exercise": "Squat (Barbell)", "sets": ["2x5@100kg"]}));
+        assert!(spec.get("description").is_none() && spec.get("private").is_none());
+        let back: Spec = serde_json::from_value(spec).unwrap();
+        assert_eq!(build(&back, Unit::Kg, Utc::now(), |_| Ok("D04AC939".into())).unwrap()["workout"]["exercises"][0]["sets"][1]["weight_kg"], 100.0);
+
+        let r = json!({"title": "Push A", "folder_id": 42, "exercises": [{"title": "Bench Press (Barbell)", "rest_seconds": 90, "superset_id": null,
+            "sets": [{"type": "normal", "weight_kg": 60, "reps": null, "rep_range": {"start": 8, "end": 12}}]}]});
+        let (rs, collapsed) = export_routine(&r, Unit::Kg, false);
+        assert_eq!(rs["exercises"][0], json!({"exercise": "Bench Press (Barbell)", "rest": 90, "sets": ["8-12@60kg"]}));
+        assert!(collapsed.is_empty());
+        let (ws, collapsed) = export_routine(&r, Unit::Kg, true);
+        assert_eq!(ws["exercises"][0], json!({"exercise": "Bench Press (Barbell)", "sets": ["8@60kg"]}));
+        assert_eq!(collapsed, vec!["Bench Press (Barbell)"]);
     }
 
     #[test]

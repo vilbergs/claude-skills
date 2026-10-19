@@ -1,6 +1,6 @@
 [package]
 name = "hevy"
-description = "Hevy API CLI: log workouts from a compact spec, search exercise templates, list workouts"
+description = "Hevy API CLI: log workouts and routines from a compact spec, progress history, stats, body measurements"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
