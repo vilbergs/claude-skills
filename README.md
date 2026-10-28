@@ -9,14 +9,13 @@ the skill's `SKILL.md` just tells Claude which subcommand to run.
 |---|---|---|
 | `notion` | Query databases, read pages as markdown, append/update/replace/delete blocks, create pages, set properties, file template-based issues, raw API calls | [`skills/notion`](skills/notion/SKILL.md) |
 | `prkit` | GitHub PR helpers on top of `gh`: review threads with comment ids, post a review from a draft dir (anchors validated against the diff), replies, pending reviews, my review queue, team triage | used by private review skills |
-| `things` | Things 3 on macOS: reads the local SQLite DB, writes via the `things:///` URL scheme | [`skills/things`](skills/things/SKILL.md) |
 | `asc` | App Store Connect API: signs its own JWT; Xcode Cloud workflows/runs/artifacts, builds, raw calls | [`skills/app-store-connect`](skills/app-store-connect/SKILL.md) |
 | `hevy` | Hevy workout tracker API: log workouts and build routines from a compact spec (`"3x8@80 rpe8"`, `"3x8-12@60"`, exercises by name), turn past workouts/routines back into specs, per-lift history with e1RM/PRs, training stats, body measurements | [`skills/hevy`](skills/hevy/SKILL.md) |
 
 ## Install
 
 ```bash
-for c in notion prkit things asc hevy; do cargo install --path crates/$c; done
+for c in notion prkit asc hevy; do cargo install --path crates/$c; done
 cp config.example.toml ~/.config/claude-skills/config.toml   # then fill in your ids
 for s in skills/*/; do ln -s "$PWD/$s" ~/.claude/skills/; done
 ```
@@ -32,7 +31,6 @@ from `~/.hevy_api_key` (or `HEVY_API_KEY`).
 crates/common   config loading (~/.config/claude-skills/config.toml), shared helpers
 crates/notion   notion CLI
 crates/prkit    prkit CLI
-crates/things   things CLI
 crates/asc      asc CLI
 crates/hevy     hevy CLI
 skills/         SKILL.md files, symlinked into ~/.claude/skills
